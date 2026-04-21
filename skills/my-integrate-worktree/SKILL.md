@@ -17,7 +17,30 @@ Explicit user invocation of this skill authorizes the fetch, rebase, staging, co
 
 Do not perform unrelated git operations outside this workflow.
 
-## Step 1: Resolve the Current Git Context
+## Preferred Execution
+
+Before any repo mutation, prefer delegating the full workflow to `committer`.
+
+1. Resolve the non-mutating context needed for the task prompt:
+   - `<checkout-path>` with `git rev-parse --show-toplevel`
+   - the absolute helper path, preferably with `realpath ~/.codex/skills/my-integrate-worktree/scripts/integrate_worktree.sh`; if that installed path does not exist, resolve the current skill's helper path and pass that absolute path instead
+   - whether the user explicitly asked to skip pushing
+2. Try `spawn_agent` with:
+   - `agent_type: "committer"`
+   - `fork_context: false`
+   - a narrow task prompt that includes:
+     - `<checkout-path>`
+     - the absolute helper path for `integrate_worktree.sh`
+     - the user's request nuance, including whether to append `--skip-push`
+     - the authorization and rules from this skill
+     - the complete fallback workflow below, including detached-`HEAD` inference, upstream resolution, rebase-abort behavior, and final reporting requirements
+     - enough operative detail that the child does not need to reload this skill on its own
+3. If the subagent starts successfully, wait for it to finish and treat its result as authoritative.
+4. After a successful handoff, do not perform local git operations in the parent agent.
+5. If the subagent reports a blocker or error after it started, surface that result and stop.
+6. Only if the subagent cannot be started before any repo mutation, run the fallback workflow below in the current agent.
+
+## Fallback Step 1: Resolve the Current Git Context
 
 1. Run `git rev-parse HEAD` and store it as the initial `<source-ref>`.
 2. Run `git rev-parse --short HEAD` and store it for detached-HEAD reporting.
@@ -56,7 +79,7 @@ If the current checkout path is different from the shared repo root, run `git wo
 
 Do not derive branch context from the worktree name. Never use `HEAD@{upstream}` in detached mode.
 
-## Step 2: Verify the Bundled Helper
+## Fallback Step 2: Verify the Bundled Helper
 
 Define `<skill-dir>` as the directory containing this `SKILL.md`.
 
@@ -68,7 +91,7 @@ Require this helper to exist:
 
 If it is missing, report the missing path and stop.
 
-## Step 3: Check Cleanliness
+## Fallback Step 3: Check Cleanliness
 
 Run `git status --porcelain`.
 
@@ -80,7 +103,7 @@ If the working tree is dirty:
    - untracked files from porcelain output
 2. Commit everything before continuing, following the workflow from `my-commit-changes`.
 
-## Step 4: Fetch and Inspect Commits Ahead of the Target
+## Fallback Step 4: Fetch and Inspect Commits Ahead of the Target
 
 Run:
 
@@ -103,7 +126,7 @@ Target:      <target-ref>
 Commits:     <N> ahead of <target-ref>
 ```
 
-## Step 5: Rebase Onto the Latest Target
+## Fallback Step 5: Rebase Onto the Latest Target
 
 Run automatically:
 
@@ -129,7 +152,7 @@ After a successful rebase:
 2. recompute the integrated commit list with `git log <target-ref>..<source-ref> --oneline`
 3. use the refreshed commit list for all later reporting so the SHAs match the rebased commits that will be integrated
 
-## Step 6: Run the Bundled Integration Helper
+## Fallback Step 6: Run the Bundled Integration Helper
 
 Run the bundled helper with the rebased source ref and resolved target metadata:
 
@@ -146,7 +169,7 @@ If the helper exits non-zero:
 3. if detached, remind the user that the rebased commits are still checked out on detached `HEAD` and are not backed by a named branch
 4. stop
 
-## Step 7: Report Success
+## Fallback Step 7: Report Success
 
 Show:
 
