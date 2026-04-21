@@ -7,6 +7,8 @@ description: Commit all uncommitted changes, grouping related files into atomic 
 
 Commit all uncommitted changes, intelligently grouping related files into one or more atomic Conventional Commits.
 
+This workflow works the same from an attached branch or detached `HEAD`; it does not require branch or upstream resolution.
+
 ## Authorization
 
 Explicit user invocation of this skill authorizes the git inspection, staging, unstaging, and commit operations required by this workflow.

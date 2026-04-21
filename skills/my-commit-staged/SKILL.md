@@ -7,6 +7,8 @@ description: Commit only the currently staged changes with a single Conventional
 
 Commit only the currently staged changes.
 
+This workflow works the same from an attached branch or detached `HEAD`; it does not require branch or upstream resolution.
+
 ## Authorization
 
 Explicit user invocation of this skill authorizes `git commit` for the already staged changes only.
