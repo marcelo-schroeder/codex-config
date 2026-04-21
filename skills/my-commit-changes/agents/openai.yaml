@@ -1,3 +1,7 @@
 interface:
   display_name: "my-commit-changes"
-  short_description: "Commit all pending changes as atomic commits"
+  short_description: "Commit pending changes via the committer subagent"
+  default_prompt: "Use $my-commit-changes and delegate the full workflow to the committer subagent."
+
+policy:
+  allow_implicit_invocation: false

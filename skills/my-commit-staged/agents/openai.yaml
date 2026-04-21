@@ -1,3 +1,7 @@
 interface:
   display_name: "my-commit-staged"
-  short_description: "Commit already staged changes with one clean commit"
+  short_description: "Commit staged changes via the committer subagent"
+  default_prompt: "Use $my-commit-staged and delegate the full workflow to the committer subagent."
+
+policy:
+  allow_implicit_invocation: false

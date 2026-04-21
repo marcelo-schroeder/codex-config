@@ -1,3 +1,7 @@
 interface:
   display_name: "my-integrate-worktree"
-  short_description: "Integrate a worktree into its tracked upstream branch"
+  short_description: "Integrate a worktree via the committer subagent"
+  default_prompt: "Use $my-integrate-worktree and delegate the full workflow to the committer subagent."
+
+policy:
+  allow_implicit_invocation: false
