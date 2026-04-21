@@ -3,7 +3,7 @@ name: my-commit-staged
 description: Commit only the currently staged changes with a single Conventional Commit message. Use when the staging area already contains exactly what should be committed.
 ---
 
-# My Commit Staged
+# my-commit-staged
 
 Commit only the currently staged changes.
 
