@@ -1,0 +1,3 @@
+interface:
+  display_name: "my-commit-changes"
+  short_description: "Commit all pending changes as atomic commits"

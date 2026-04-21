@@ -1,0 +1,3 @@
+interface:
+  display_name: "my-commit-staged"
+  short_description: "Commit already staged changes with one clean commit"

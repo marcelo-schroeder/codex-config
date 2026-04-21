@@ -1,0 +1,3 @@
+interface:
+  display_name: "my-integrate-worktree"
+  short_description: "Integrate a worktree into its tracked upstream branch"

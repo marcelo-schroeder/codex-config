@@ -3,8 +3,6 @@ name: my-integrate-worktree
 description: Integrate the current source ref into its tracked upstream target by validating git worktree state, rebasing onto the target branch, and running the bundled integration helper. Use when a Codex worktree or main checkout branch is ready to merge into its upstream target, including detached Codex worktrees whose source branch can be inferred unambiguously.
 ---
 
-# my-integrate-worktree
-
 Integrate the current source ref into its tracked upstream target branch from a standard git checkout or git worktree session.
 
 Use the resolved context branch's upstream as the authoritative integration target. In `vidproj`, this usually resolves to `origin/develop`.

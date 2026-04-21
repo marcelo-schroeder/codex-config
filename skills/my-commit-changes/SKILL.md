@@ -3,8 +3,6 @@ name: my-commit-changes
 description: Commit all uncommitted changes, grouping related files into atomic Conventional Commits. Use when staged, unstaged, or untracked changes should be committed together.
 ---
 
-# my-commit-changes
-
 Commit all uncommitted changes, intelligently grouping related files into one or more atomic Conventional Commits.
 
 This workflow works the same from an attached branch or detached `HEAD`; it does not require branch or upstream resolution.

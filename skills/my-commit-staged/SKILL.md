@@ -3,8 +3,6 @@ name: my-commit-staged
 description: Commit only the currently staged changes with a single Conventional Commit message. Use when the staging area already contains exactly what should be committed.
 ---
 
-# my-commit-staged
-
 Commit only the currently staged changes.
 
 This workflow works the same from an attached branch or detached `HEAD`; it does not require branch or upstream resolution.
