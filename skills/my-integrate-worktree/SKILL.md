@@ -15,6 +15,23 @@ Explicit user invocation of this skill authorizes the fetch, rebase, staging, co
 
 Do not perform unrelated git operations outside this workflow.
 
+## Execution
+
+Before any repo mutation, delegate the full workflow to `committer`.
+
+1. Resolve `<checkout-path>` with `git rev-parse --show-toplevel`.
+2. Resolve the absolute helper path for `integrate_worktree.sh`, preferably with `realpath ~/.codex/skills/my-integrate-worktree/scripts/integrate_worktree.sh`; if that installed path does not exist, resolve the current skill helper path and use that absolute path instead.
+3. Spawn `committer` with `fork_context: false` and instruct it to execute the workflow below in `<checkout-path>`, passing:
+   - the absolute helper path for `integrate_worktree.sh`
+   - whether to append `--skip-push`
+   - the authorization and rules from this skill
+   - the complete workflow below, including detached-`HEAD` inference, upstream resolution, rebase-abort behavior, and final reporting requirements
+   - enough operative detail that the child does not need to reload this skill or re-enter `## Execution`
+4. If the subagent starts successfully, wait for it to finish and treat its result as authoritative.
+5. After a successful handoff, do not perform local git operations in the parent agent.
+6. If the subagent reports a blocker or error, surface that result and stop.
+7. If `committer` cannot be started before any repo mutation, report that delegation could not be performed and stop.
+
 ## Step 1: Resolve the Current Git Context
 
 1. Run `git rev-parse HEAD` and store it as the initial `<source-ref>`.

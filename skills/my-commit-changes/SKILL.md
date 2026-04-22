@@ -13,6 +13,22 @@ Explicit user invocation of this skill authorizes the git inspection, staging, u
 
 Do not perform unrelated git operations outside this workflow.
 
+## Execution
+
+Before any repo mutation, delegate the full workflow to `committer`.
+
+1. Resolve `<repo-root>` with `git rev-parse --show-toplevel`.
+2. Spawn `committer` with `fork_context: false` and instruct it to execute the workflow below in `<repo-root>`, passing:
+   - whether the user explicitly asked to stop after the plan
+   - the authorization and rules from this skill
+   - the complete workflow below as operative instructions
+   - the expected final output: `No uncommitted changes found.`, a numbered commit plan, or the commit messages used
+   - enough operative detail that the child does not need to reload this skill or re-enter `## Execution`
+3. If the subagent starts successfully, wait for it to finish and treat its result as authoritative.
+4. After a successful handoff, do not perform local git operations in the parent agent.
+5. If the subagent reports a blocker or error, surface that result and stop.
+6. If `committer` cannot be started before any repo mutation, report that delegation could not be performed and stop.
+
 ## Step 1: Gather All Changes
 
 Run these commands to understand the full picture:

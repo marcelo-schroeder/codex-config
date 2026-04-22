@@ -13,6 +13,22 @@ Explicit user invocation of this skill authorizes `git commit` for the already s
 
 It does not authorize staging, unstaging, or otherwise modifying the staging area.
 
+## Execution
+
+Before any repo mutation, delegate the full workflow to `committer`.
+
+1. Resolve `<repo-root>` with `git rev-parse --show-toplevel`.
+2. Spawn `committer` with `fork_context: false` and instruct it to execute the workflow below in `<repo-root>`, passing:
+   - the user's request nuance
+   - the staged-only authorization and rules from this skill
+   - the expected final output: `No staged changes to commit.` or the final commit message used
+   - the complete workflow below as operative instructions
+   - enough operative detail that the child does not need to reload this skill or re-enter `## Execution`
+3. If the subagent starts successfully, wait for it to finish and treat its result as authoritative.
+4. After a successful handoff, do not perform local git operations in the parent agent.
+5. If the subagent reports a blocker or error, surface that result and stop.
+6. If `committer` cannot be started before any repo mutation, report that delegation could not be performed and stop.
+
 ## Workflow
 
 1. Run `git diff --cached --stat` to check whether anything is staged.
