@@ -1,0 +1,7 @@
+interface:
+  display_name: "my-automation-email"
+  short_description: "Read Gmail accounts for personal automation"
+  default_prompt: "Use $my-automation-email to search my Gmail accounts for relevant messages."
+
+policy:
+  allow_implicit_invocation: false
