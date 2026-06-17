@@ -13,6 +13,7 @@ export const KEYCHAIN_CREDENTIALS_ACCOUNT = 'credentials';
 export const KEYCHAIN_PRIMARY_TOKEN_ACCOUNT = 'token-primary';
 export const KEYCHAIN_TOKEN_ACCOUNT = KEYCHAIN_PRIMARY_TOKEN_ACCOUNT;
 export const KEYCHAIN_SECONDARY_TOKEN_ACCOUNT = 'token-secondary';
+export const KEYCHAIN_TERTIARY_TOKEN_ACCOUNT = 'token-tertiary';
 export const MIGRATED_KEYCHAIN_ACCOUNTS = [
   KEYCHAIN_CREDENTIALS_ACCOUNT,
   KEYCHAIN_PRIMARY_TOKEN_ACCOUNT,
@@ -30,6 +31,12 @@ export const GMAIL_MAILBOXES = [
     tokenAccount: KEYCHAIN_SECONDARY_TOKEN_ACCOUNT,
     gmailUserIndex: 0,
     matchPriority: 0,
+  },
+  {
+    label: 'tertiary',
+    tokenAccount: KEYCHAIN_TERTIARY_TOKEN_ACCOUNT,
+    gmailUserIndex: 2,
+    matchPriority: -1,
   },
 ];
 

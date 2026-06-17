@@ -57,15 +57,19 @@ assert.deepEqual(parseArgs(['--search', 'from:a', '--max-results=2', '--no-text'
   'no-text': true,
 });
 assert.deepEqual(parseMailboxSelection('both'), ['primary', 'secondary']);
+assert.deepEqual(parseMailboxSelection('tertiary'), ['tertiary']);
 assert.deepEqual(parseMailboxSelection('secondary,primary,secondary'), ['secondary', 'primary']);
 assert.equal(KEYCHAIN_SERVICE, 'my-automation.gmail-oauth');
 assert.equal(LEGACY_KEYCHAIN_SERVICE, 'transactions.gmail-oauth');
 assert.equal(tokenAccountForMailbox('primary'), 'token-primary');
 assert.equal(tokenAccountForMailbox('secondary'), 'token-secondary');
+assert.equal(tokenAccountForMailbox('tertiary'), 'token-tertiary');
 assert.equal(gmailMailboxConfig('primary').gmailUserIndex, 1);
 assert.equal(gmailMailboxConfig('primary').matchPriority, 1);
 assert.equal(gmailMailboxConfig('secondary').gmailUserIndex, 0);
 assert.equal(gmailMailboxConfig('secondary').matchPriority, 0);
+assert.equal(gmailMailboxConfig('tertiary').gmailUserIndex, 2);
+assert.equal(gmailMailboxConfig('tertiary').matchPriority, -1);
 assert.equal(keychainRef('token-primary'), 'keychain://my-automation.gmail-oauth/token-primary');
 
 const secondaryRefreshOptions = tokenRefreshWriteOptions({
@@ -97,6 +101,17 @@ assert.equal(formatted.gmail_account_index, 1);
 assert.equal(formatted.gmail_direct_url, 'https://mail.google.com/mail/u/1/#all/thread-abc123');
 assert.equal(formatted.text, 'Plain text body');
 assert.equal(Object.values(formatted).includes('must-not-leak'), false);
+
+const tertiaryFormatted = formatMessageForOutput(sample, {
+  label: 'tertiary',
+  profileEmail: 'tertiary@example.com',
+  gmailUserIndex: 2,
+  matchPriority: -1,
+});
+assert.equal(tertiaryFormatted.gmail_mailbox, 'tertiary');
+assert.equal(tertiaryFormatted.gmail_mailbox_email, 'tertiary@example.com');
+assert.equal(tertiaryFormatted.gmail_account_index, 2);
+assert.equal(tertiaryFormatted.gmail_direct_url, 'https://mail.google.com/mail/u/2/#all/thread-abc123');
 
 const store = new Map();
 function key(account, service) {

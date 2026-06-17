@@ -13,8 +13,10 @@ Configured mailboxes:
 | --- | ---: | --- |
 | `primary` | `/u/1/` | `token-primary` |
 | `secondary` | `/u/0/` | `token-secondary` |
+| `tertiary` | `/u/2/` | `token-tertiary` |
 
 Shared OAuth client credentials are stored in Keychain account `credentials`.
+The `tertiary` mailbox is optional and is never included by `both` or by default searches; select it explicitly when a workflow requests tertiary fallback.
 
 ## Safety
 
@@ -42,6 +44,7 @@ node scripts/email.mjs \
 ```
 
 The migration copies `credentials`, `token-primary`, and `token-secondary`, verifies Gmail auth using the new service, then deletes those old entries only after verification succeeds. After migration, use only `my-automation.gmail-oauth`; there is no runtime fallback to the old service.
+The optional `token-tertiary` account is not part of legacy migration; initialize it directly under `my-automation.gmail-oauth` if needed.
 
 Import Google OAuth desktop-client credentials after user approval:
 
@@ -67,6 +70,15 @@ node scripts/email.mjs \
   --authorize-keychain-update
 ```
 
+For the optional tertiary mailbox, use:
+
+```bash
+node scripts/email.mjs \
+  --init-auth \
+  --mailbox tertiary \
+  --authorize-keychain-update
+```
+
 Open the printed auth URL manually, authorize read-only Gmail access with the intended account, and let the localhost callback store the token in Keychain.
 
 ## Reading Email
@@ -77,6 +89,15 @@ Search both mailboxes:
 node scripts/email.mjs \
   --search 'from:example@example.com newer_than:30d' \
   --mailboxes primary,secondary \
+  --max-results 20
+```
+
+Search the optional tertiary mailbox only when explicitly requested:
+
+```bash
+node scripts/email.mjs \
+  --search 'from:example@example.com newer_than:30d' \
+  --mailboxes tertiary \
   --max-results 20
 ```
 
