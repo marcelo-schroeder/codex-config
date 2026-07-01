@@ -7,10 +7,13 @@ import {
   encodeKeychainValue,
   extractMessageText,
   formatMessageForOutput,
+  gmailMessageAccountChooserUrl,
   gmailMailboxConfig,
   gmailMessageSearchQuery,
   gmailMessageWebUrl,
+  gmailThreadAccountChooserUrl,
   gmailThreadDirectUrl,
+  googleAccountChooserUrl,
   keychainRef,
   migrateKeychainService,
   parseArgs,
@@ -86,7 +89,21 @@ const sample = message({ id: 'abc123', subject: 'Receipt', body: 'Plain text bod
 assert.equal(extractMessageText(sample), 'Plain text body');
 assert.equal(gmailMessageSearchQuery('<abc123@example.com>'), 'rfc822msgid:abc123@example.com');
 assert.equal(gmailMessageWebUrl('<abc123@example.com>', 1), 'https://mail.google.com/mail/u/1/#search/rfc822msgid%3Aabc123%40example.com');
+assert.equal(gmailMessageWebUrl('<abc123@example.com>', 1, 'primary@example.com'), 'https://mail.google.com/mail/?authuser=primary%40example.com#search/rfc822msgid%3Aabc123%40example.com');
 assert.equal(gmailThreadDirectUrl('thread-abc123', 1), 'https://mail.google.com/mail/u/1/#all/thread-abc123');
+assert.equal(gmailThreadDirectUrl('thread-abc123', 1, 'primary@example.com'), 'https://mail.google.com/mail/?authuser=primary%40example.com#all/thread-abc123');
+assert.equal(
+  googleAccountChooserUrl('https://mail.google.com/mail/?authuser=primary%40example.com#all/thread-abc123', 'primary@example.com'),
+  'https://accounts.google.com/AccountChooser?Email=primary%40example.com&continue=https%3A%2F%2Fmail.google.com%2Fmail%2F%3Fauthuser%3Dprimary%2540example.com%23all%2Fthread-abc123',
+);
+assert.equal(
+  gmailThreadAccountChooserUrl('thread-abc123', 1, 'primary@example.com'),
+  'https://accounts.google.com/AccountChooser?Email=primary%40example.com&continue=https%3A%2F%2Fmail.google.com%2Fmail%2F%3Fauthuser%3Dprimary%2540example.com%23all%2Fthread-abc123',
+);
+assert.equal(
+  gmailMessageAccountChooserUrl('<abc123@example.com>', 1, 'primary@example.com'),
+  'https://accounts.google.com/AccountChooser?Email=primary%40example.com&continue=https%3A%2F%2Fmail.google.com%2Fmail%2F%3Fauthuser%3Dprimary%2540example.com%23search%2Frfc822msgid%253Aabc123%2540example.com',
+);
 const formatted = formatMessageForOutput(sample, {
   label: 'primary',
   profileEmail: 'primary@example.com',
@@ -98,7 +115,10 @@ assert.equal(formatted.gmail_message_id, 'abc123');
 assert.equal(formatted.gmail_mailbox, 'primary');
 assert.equal(formatted.gmail_mailbox_email, 'primary@example.com');
 assert.equal(formatted.gmail_account_index, 1);
-assert.equal(formatted.gmail_direct_url, 'https://mail.google.com/mail/u/1/#all/thread-abc123');
+assert.equal(formatted.gmail_direct_url, 'https://mail.google.com/mail/?authuser=primary%40example.com#all/thread-abc123');
+assert.equal(formatted.gmail_web_url, 'https://mail.google.com/mail/?authuser=primary%40example.com#search/rfc822msgid%3Aabc123%40example.com');
+assert.equal(formatted.gmail_account_chooser_direct_url, 'https://accounts.google.com/AccountChooser?Email=primary%40example.com&continue=https%3A%2F%2Fmail.google.com%2Fmail%2F%3Fauthuser%3Dprimary%2540example.com%23all%2Fthread-abc123');
+assert.equal(formatted.gmail_account_chooser_web_url, 'https://accounts.google.com/AccountChooser?Email=primary%40example.com&continue=https%3A%2F%2Fmail.google.com%2Fmail%2F%3Fauthuser%3Dprimary%2540example.com%23search%2Frfc822msgid%253Aabc123%2540example.com');
 assert.equal(formatted.text, 'Plain text body');
 assert.equal(Object.values(formatted).includes('must-not-leak'), false);
 
@@ -111,7 +131,7 @@ const tertiaryFormatted = formatMessageForOutput(sample, {
 assert.equal(tertiaryFormatted.gmail_mailbox, 'tertiary');
 assert.equal(tertiaryFormatted.gmail_mailbox_email, 'tertiary@example.com');
 assert.equal(tertiaryFormatted.gmail_account_index, 2);
-assert.equal(tertiaryFormatted.gmail_direct_url, 'https://mail.google.com/mail/u/2/#all/thread-abc123');
+assert.equal(tertiaryFormatted.gmail_direct_url, 'https://mail.google.com/mail/?authuser=tertiary%40example.com#all/thread-abc123');
 
 const store = new Map();
 function key(account, service) {

@@ -250,20 +250,56 @@ export function gmailMessageSearchQuery(messageIdHeader) {
   return `rfc822msgid:${clean}`;
 }
 
-export function gmailMessageWebUrl(messageIdHeader, accountIndex = 0) {
+export function gmailAccountScopedBase(accountEmail) {
+  const clean = normalizeWhitespace(accountEmail);
+  if (!clean) {
+    return '';
+  }
+  return `https://mail.google.com/mail/?authuser=${encodeURIComponent(clean)}`;
+}
+
+export function gmailMessageWebUrl(messageIdHeader, accountIndex = 0, accountEmail = '') {
   const query = gmailMessageSearchQuery(messageIdHeader);
   if (!query) {
     return '';
   }
+  const accountScopedBase = gmailAccountScopedBase(accountEmail);
+  if (accountScopedBase) {
+    return `${accountScopedBase}#search/${encodeURIComponent(query)}`;
+  }
   return `https://mail.google.com/mail/u/${accountIndex}/#search/${encodeURIComponent(query)}`;
 }
 
-export function gmailThreadDirectUrl(threadId, accountIndex = 0) {
+export function gmailThreadDirectUrl(threadId, accountIndex = 0, accountEmail = '') {
   const clean = String(threadId || '').trim();
   if (!clean) {
     return '';
   }
+  const accountScopedBase = gmailAccountScopedBase(accountEmail);
+  if (accountScopedBase) {
+    return `${accountScopedBase}#all/${encodeURIComponent(clean)}`;
+  }
   return `https://mail.google.com/mail/u/${accountIndex}/#all/${encodeURIComponent(clean)}`;
+}
+
+export function googleAccountChooserUrl(continueUrl, accountEmail = '') {
+  const href = String(continueUrl || '').trim();
+  const email = normalizeWhitespace(accountEmail);
+  if (!href || !email) {
+    return href;
+  }
+  const url = new URL('https://accounts.google.com/AccountChooser');
+  url.searchParams.set('Email', email);
+  url.searchParams.set('continue', href);
+  return url.toString();
+}
+
+export function gmailMessageAccountChooserUrl(messageIdHeader, accountIndex = 0, accountEmail = '') {
+  return googleAccountChooserUrl(gmailMessageWebUrl(messageIdHeader, accountIndex, accountEmail), accountEmail);
+}
+
+export function gmailThreadAccountChooserUrl(threadId, accountIndex = 0, accountEmail = '') {
+  return googleAccountChooserUrl(gmailThreadDirectUrl(threadId, accountIndex, accountEmail), accountEmail);
 }
 
 export function base64UrlDecode(value) {
@@ -347,15 +383,20 @@ export function messageMetadata(message, gmailAccount = {}) {
   const matchPriority = Number.isInteger(Number(gmailAccount.matchPriority))
     ? Number(gmailAccount.matchPriority)
     : configuredMailbox.matchPriority;
+  const profileEmail = gmailAccount.profileEmail || '';
+  const gmailWebUrl = gmailMessageWebUrl(rfc822MessageId, gmailUserIndex, profileEmail);
+  const gmailDirectUrl = gmailThreadDirectUrl(message.threadId || message.id, gmailUserIndex, profileEmail);
   return {
     gmail_message_id: message.id || '',
     gmail_thread_id: message.threadId || '',
     gmail_rfc822_message_id: rfc822MessageId,
     gmail_search_query: gmailMessageSearchQuery(rfc822MessageId),
-    gmail_web_url: gmailMessageWebUrl(rfc822MessageId, gmailUserIndex),
-    gmail_direct_url: gmailThreadDirectUrl(message.threadId || message.id, gmailUserIndex),
+    gmail_web_url: gmailWebUrl,
+    gmail_direct_url: gmailDirectUrl,
+    gmail_account_chooser_web_url: googleAccountChooserUrl(gmailWebUrl, profileEmail),
+    gmail_account_chooser_direct_url: googleAccountChooserUrl(gmailDirectUrl, profileEmail),
     gmail_mailbox: mailboxLabel,
-    gmail_mailbox_email: gmailAccount.profileEmail || '',
+    gmail_mailbox_email: profileEmail,
     gmail_account_index: gmailUserIndex,
     gmail_match_priority: matchPriority,
     gmail_from: headerValue(message, 'From'),
