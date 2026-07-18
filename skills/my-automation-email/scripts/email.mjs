@@ -15,11 +15,18 @@ import {
   secretRef,
   verifyGmailAuthForMailboxes,
 } from './lib/gmail-access.mjs';
+import {
+  applyAuthRepairPlan,
+  prepareAuthRepair,
+  readAuthRepairPlan,
+} from './lib/auth-repair.mjs';
 
 function usage() {
   console.error([
     'Usage:',
     '  node scripts/email.mjs --auth-check --mailbox both',
+    '  node scripts/email.mjs --prepare-auth-repair --mailboxes primary,secondary',
+    '  node scripts/email.mjs --apply-auth-repair --plan-json <path> --authorize-keychain-update',
     '  node scripts/email.mjs --migrate-keychain-service --authorize-keychain-update',
     '  node scripts/email.mjs --import-credentials <path> --authorize-keychain-update',
     '  node scripts/email.mjs --init-auth --mailbox primary --authorize-keychain-update',
@@ -29,6 +36,9 @@ function usage() {
     '',
     'Options:',
     '  --auth-check                    Verify Gmail read-only access; may persist refreshed OAuth tokens',
+    '  --prepare-auth-repair           Read-only per-mailbox readiness check and sanitized repair-plan output',
+    '  --apply-auth-repair             Apply exactly one approved repair plan, sequentially',
+    '  --plan-json <path>              Exact JSON plan produced by --prepare-auth-repair',
     '  --migrate-keychain-service      Copy transactions.gmail-oauth entries to my-automation.gmail-oauth, verify, then delete old entries',
     '  --import-credentials <path>     Import Google OAuth desktop-client JSON into Keychain',
     '  --authorize-keychain-update     Required with --migrate-keychain-service, --import-credentials, or --init-auth',
@@ -57,6 +67,26 @@ async function main() {
   }
 
   const secretOptions = { keychainService: KEYCHAIN_SERVICE };
+
+  if (args['prepare-auth-repair']) {
+    const mailboxLabels = parseMailboxSelection(args.mailboxes || '', []);
+    const result = await prepareAuthRepair({ baseOptions: secretOptions, mailboxes: mailboxLabels });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+
+  if (args['apply-auth-repair']) {
+    requireKeychainAuthorization(args, '--apply-auth-repair');
+    if (!args['plan-json']) throw new Error('--apply-auth-repair requires --plan-json <path>');
+    const plan = readAuthRepairPlan(path.resolve(String(args['plan-json'])));
+    const result = await applyAuthRepairPlan(plan, {
+      baseOptions: secretOptions,
+      timeoutMs: args['auth-timeout-ms'] ? Number(args['auth-timeout-ms']) : 180000,
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    if (!result.ok) process.exitCode = 2;
+    return;
+  }
 
   if (args['migrate-keychain-service']) {
     requireKeychainAuthorization(args, '--migrate-keychain-service');

@@ -22,18 +22,21 @@ export const MIGRATED_KEYCHAIN_ACCOUNTS = [
 export const GMAIL_MAILBOXES = [
   {
     label: 'primary',
+    expectedEmail: 'marcelo.schroeder@gmail.com',
     tokenAccount: KEYCHAIN_PRIMARY_TOKEN_ACCOUNT,
     gmailUserIndex: 1,
     matchPriority: 1,
   },
   {
     label: 'secondary',
+    expectedEmail: 'schroeder.marcelo@gmail.com',
     tokenAccount: KEYCHAIN_SECONDARY_TOKEN_ACCOUNT,
     gmailUserIndex: 0,
     matchPriority: 0,
   },
   {
     label: 'tertiary',
+    expectedEmail: 'schroeder.adriana@gmail.com',
     tokenAccount: KEYCHAIN_TERTIARY_TOKEN_ACCOUNT,
     gmailUserIndex: 2,
     matchPriority: -1,
@@ -92,6 +95,7 @@ export function mailboxSecretOptions(baseOptions = {}, label) {
   return {
     ...baseOptions,
     mailbox: mailbox.label,
+    expectedEmail: mailbox.expectedEmail,
     tokenAccount: mailbox.tokenAccount,
     gmailUserIndex: mailbox.gmailUserIndex,
     matchPriority: mailbox.matchPriority,
@@ -596,6 +600,7 @@ export async function initAuth({ timeoutMs = 180000, ...options }) {
       process.stdout.write(`${JSON.stringify({
         action: 'open_auth_url',
         mailbox: options.mailbox || 'primary',
+        expectedEmail: options.expectedEmail || '',
         authUrl: authUrl.toString(),
         redirectUri,
         tokenRef: secretRef('token', options),
@@ -613,10 +618,36 @@ export async function initAuth({ timeoutMs = 180000, ...options }) {
     scope: token.scope || GMAIL_READONLY_SCOPE,
     expiry_date: token.expires_in ? Date.now() + Number(token.expires_in) * 1000 : undefined,
   };
-  writeSecret('token', `${JSON.stringify(stored, null, 2)}\n`, options);
+  return verifyAndStoreAuthorizedToken(stored, options);
+}
+
+export async function verifyAndStoreAuthorizedToken(stored, options, {
+  gmailRequestFn = gmailRequest,
+  writeSecretFn = writeSecret,
+} = {}) {
+  const profile = await gmailRequestFn(stored.access_token, '/users/me/profile');
+  const profileEmail = normalizeComparable(profile.emailAddress);
+  const expectedEmail = normalizeComparable(options.expectedEmail);
+  if (expectedEmail && profileEmail !== expectedEmail) {
+    return {
+      ok: false,
+      status: 'wrong_account',
+      mailbox: options.mailbox || 'primary',
+      expectedEmail: options.expectedEmail,
+      profileEmail: profile.emailAddress || '',
+      tokenPreserved: true,
+    };
+  }
+  if (!options.allowKeychainWrite) {
+    throw new Error('Gmail OAuth authorization completed, but Keychain update was not authorized');
+  }
+  writeSecretFn('token', `${JSON.stringify(stored, null, 2)}\n`, options);
   return {
     ok: true,
+    status: 'ready',
     mailbox: options.mailbox || 'primary',
+    expectedEmail: options.expectedEmail || '',
+    profileEmail: profile.emailAddress || '',
     tokenRef: secretRef('token', options),
     scope: stored.scope,
     expiryDate: stored.expiry_date ? new Date(stored.expiry_date).toISOString() : '',

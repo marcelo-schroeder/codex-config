@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import {
+  GMAIL_MAILBOXES,
+  GMAIL_READONLY_SCOPE,
   KEYCHAIN_SERVICE,
   LEGACY_KEYCHAIN_SERVICE,
   canPersistTokenRefresh,
@@ -20,7 +22,15 @@ import {
   parseMailboxSelection,
   tokenAccountForMailbox,
   tokenRefreshWriteOptions,
+  verifyAndStoreAuthorizedToken,
 } from './lib/gmail-access.mjs';
+import {
+  applyAuthRepairPlan,
+  assertSanitizedAuthValue,
+  checkMailboxAuth,
+  prepareAuthRepair,
+  validateAuthRepairPlan,
+} from './lib/auth-repair.mjs';
 
 function encodeBody(text) {
   return Buffer.from(text, 'utf8').toString('base64url');
@@ -73,6 +83,7 @@ assert.equal(gmailMailboxConfig('secondary').gmailUserIndex, 0);
 assert.equal(gmailMailboxConfig('secondary').matchPriority, 0);
 assert.equal(gmailMailboxConfig('tertiary').gmailUserIndex, 2);
 assert.equal(gmailMailboxConfig('tertiary').matchPriority, -1);
+assert.equal(typeof gmailMailboxConfig('primary').expectedEmail, 'string');
 assert.equal(keychainRef('token-primary'), 'keychain://my-automation.gmail-oauth/token-primary');
 
 const secondaryRefreshOptions = tokenRefreshWriteOptions({
@@ -190,5 +201,129 @@ await assert.rejects(
   }),
   /Destination Keychain item already exists/,
 );
+
+const originalExpectedEmails = Object.fromEntries(GMAIL_MAILBOXES.map((mailbox) => [mailbox.label, mailbox.expectedEmail]));
+for (const mailbox of GMAIL_MAILBOXES) mailbox.expectedEmail = `${mailbox.label}@example.com`;
+try {
+  let persistedRefresh = false;
+  const ready = await checkMailboxAuth({}, 'primary', {
+    secretExistsFn: () => true,
+    readTokenFn: () => ({ scope: GMAIL_READONLY_SCOPE, access_token: 'stored-but-not-returned' }),
+    getAccessTokenFn: async (options) => {
+      assert.equal(options.allowKeychainWrite, false);
+      assert.equal(options.allowTokenRefreshWrite, false);
+      persistedRefresh = Boolean(options.allowKeychainWrite || options.allowTokenRefreshWrite);
+      return 'in-memory-access';
+    },
+    gmailRequestFn: async () => ({ emailAddress: 'PRIMARY@example.com' }),
+  });
+  assert.equal(ready.status, 'ready');
+  assert.equal(ready.profileEmail, 'primary@example.com');
+  assert.equal(persistedRefresh, false);
+  assert.doesNotMatch(JSON.stringify(ready), /stored-but-not-returned|in-memory-access/);
+
+  const missingToken = await checkMailboxAuth({}, 'primary', {
+    secretExistsFn(kind) { return kind === 'credentials'; },
+  });
+  assert.equal(missingToken.status, 'missing_token');
+
+  const missingScope = await checkMailboxAuth({}, 'primary', {
+    secretExistsFn: () => true,
+    readTokenFn: () => ({ scope: 'profile' }),
+  });
+  assert.equal(missingScope.status, 'missing_scope');
+
+  const revoked = await checkMailboxAuth({}, 'primary', {
+    secretExistsFn: () => true,
+    readTokenFn: () => ({ scope: GMAIL_READONLY_SCOPE }),
+    getAccessTokenFn: async () => { throw new Error('invalid_grant'); },
+  });
+  assert.equal(revoked.status, 'reauthorization_required');
+  assert.equal(revoked.reason, 'invalid_grant');
+
+  const wrongAccount = await checkMailboxAuth({}, 'primary', {
+    secretExistsFn: () => true,
+    readTokenFn: () => ({ scope: GMAIL_READONLY_SCOPE }),
+    getAccessTokenFn: async () => 'access',
+    gmailRequestFn: async () => ({ emailAddress: 'secondary@example.com' }),
+  });
+  assert.equal(wrongAccount.status, 'wrong_account');
+
+  const checkStates = new Map([
+    ['primary', 'reauthorization_required'],
+    ['secondary', 'ready'],
+  ]);
+  const checkFn = async (_options, mailbox) => ({
+    mailbox,
+    expectedEmail: `${mailbox}@example.com`,
+    profileEmail: checkStates.get(mailbox) === 'ready' ? `${mailbox}@example.com` : '',
+    gmailUserIndex: gmailMailboxConfig(mailbox).gmailUserIndex,
+    keychainTokenAccount: gmailMailboxConfig(mailbox).tokenAccount,
+    keychainTokenRef: keychainRef(gmailMailboxConfig(mailbox).tokenAccount),
+    requiredScope: GMAIL_READONLY_SCOPE,
+    status: checkStates.get(mailbox),
+    reason: checkStates.get(mailbox) === 'ready' ? 'verified_profile' : 'invalid_grant',
+    ready: checkStates.get(mailbox) === 'ready',
+  });
+  const planOne = await prepareAuthRepair({ mailboxes: ['primary', 'secondary'], now: new Date('2026-01-01T00:00:00Z'), checkMailboxAuthFn: checkFn });
+  const planTwo = await prepareAuthRepair({ mailboxes: ['primary', 'secondary'], now: new Date('2027-01-01T00:00:00Z'), checkMailboxAuthFn: checkFn });
+  assert.equal(planOne.planId, planTwo.planId);
+  assert.deepEqual(planOne.repairTargets.map((target) => target.mailbox), ['primary']);
+  assert.equal(validateAuthRepairPlan(planOne), planOne);
+  assert.throws(() => validateAuthRepairPlan({ ...planOne, planId: 'tampered' }), /does not match/);
+  assert.throws(() => assertSanitizedAuthValue({ access_token: 'forbidden' }), /forbidden secret field/);
+
+  let wroteCandidate = false;
+  const rejectedCandidate = await verifyAndStoreAuthorizedToken(
+    { access_token: 'candidate', scope: GMAIL_READONLY_SCOPE },
+    { mailbox: 'primary', expectedEmail: 'primary@example.com', allowKeychainWrite: true },
+    {
+      gmailRequestFn: async () => ({ emailAddress: 'secondary@example.com' }),
+      writeSecretFn: () => { wroteCandidate = true; },
+    },
+  );
+  assert.equal(rejectedCandidate.status, 'wrong_account');
+  assert.equal(rejectedCandidate.tokenPreserved, true);
+  assert.equal(wroteCandidate, false);
+
+  const changedScopeCheck = async (_options, mailbox) => ({
+    ...(await checkFn(_options, mailbox)),
+    status: 'reauthorization_required',
+    reason: 'invalid_grant',
+    ready: false,
+    profileEmail: '',
+  });
+  const changedScope = await applyAuthRepairPlan(planOne, {
+    prepareAuthRepairFn: ({ mailboxes }) => prepareAuthRepair({ mailboxes, checkMailboxAuthFn: changedScopeCheck }),
+    initAuthFn: async () => { throw new Error('must not start recovery after approval invalidation'); },
+  });
+  assert.equal(changedScope.status, 'approval_invalidated');
+  assert.deepEqual(changedScope.expandedRepairTargets.map((target) => target.mailbox), ['secondary']);
+
+  checkStates.set('secondary', 'reauthorization_required');
+  const multiPlan = await prepareAuthRepair({ mailboxes: ['primary', 'secondary'], checkMailboxAuthFn: checkFn });
+  const authOrder = [];
+  const liveStates = new Map([['primary', false], ['secondary', false]]);
+  const liveCheck = async (_options, mailbox) => ({
+    ...(await checkFn(_options, mailbox)),
+    status: liveStates.get(mailbox) ? 'ready' : 'reauthorization_required',
+    reason: liveStates.get(mailbox) ? 'verified_profile' : 'invalid_grant',
+    ready: liveStates.get(mailbox),
+    profileEmail: liveStates.get(mailbox) ? `${mailbox}@example.com` : '',
+  });
+  const recovered = await applyAuthRepairPlan(multiPlan, {
+    prepareAuthRepairFn: ({ mailboxes }) => prepareAuthRepair({ mailboxes, checkMailboxAuthFn: liveCheck }),
+    initAuthFn: async (options) => {
+      authOrder.push(options.mailbox);
+      liveStates.set(options.mailbox, true);
+      return { ok: true, status: 'ready' };
+    },
+  });
+  assert.equal(recovered.ok, true);
+  assert.deepEqual(authOrder, ['primary', 'secondary']);
+  assert.deepEqual(recovered.results.map((result) => result.status), ['repaired', 'repaired']);
+} finally {
+  for (const mailbox of GMAIL_MAILBOXES) mailbox.expectedEmail = originalExpectedEmails[mailbox.label];
+}
 
 process.stdout.write('gmail-access tests passed\n');
