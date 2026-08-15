@@ -2,9 +2,11 @@
 import path from 'node:path';
 import {
   KEYCHAIN_SERVICE,
+  gmailCapabilityForScope,
   getMessageById,
   gmailAccountsForMailboxes,
   gmailAccountForMailbox,
+  gmailOauthScope,
   importCredentialsSecret,
   initAuth,
   mailboxSecretOptions,
@@ -24,18 +26,19 @@ import {
 function usage() {
   console.error([
     'Usage:',
-    '  node scripts/email.mjs --auth-check --mailbox both',
-    '  node scripts/email.mjs --prepare-auth-repair --mailboxes primary,secondary',
+    '  node scripts/email.mjs --auth-check --mailbox both --scope readonly',
+    '  node scripts/email.mjs --auth-check --mailbox both --scope modify',
+    '  node scripts/email.mjs --prepare-auth-repair --mailboxes primary,secondary --scope readonly',
     '  node scripts/email.mjs --apply-auth-repair --plan-json <path> --authorize-keychain-update',
     '  node scripts/email.mjs --migrate-keychain-service --authorize-keychain-update',
     '  node scripts/email.mjs --import-credentials <path> --authorize-keychain-update',
-    '  node scripts/email.mjs --init-auth --mailbox primary --authorize-keychain-update',
-    '  node scripts/email.mjs --init-auth --mailbox tertiary --authorize-keychain-update',
+    '  node scripts/email.mjs --init-auth --mailbox primary --scope modify --authorize-keychain-update',
+    '  node scripts/email.mjs --init-auth --mailbox tertiary --scope readonly --authorize-keychain-update',
     '  node scripts/email.mjs --search <gmail-query> --mailboxes primary,secondary --max-results 20',
     '  node scripts/email.mjs --message-id <gmail-message-id> --mailbox primary',
     '',
     'Options:',
-    '  --auth-check                    Verify Gmail read-only access; may persist refreshed OAuth tokens',
+    '  --auth-check                    Verify the requested Gmail capability; may persist refreshed OAuth tokens',
     '  --prepare-auth-repair           Read-only per-mailbox readiness check and sanitized repair-plan output',
     '  --apply-auth-repair             Apply exactly one approved repair plan, sequentially',
     '  --plan-json <path>              Exact JSON plan produced by --prepare-auth-repair',
@@ -44,6 +47,7 @@ function usage() {
     '  --authorize-keychain-update     Required with --migrate-keychain-service, --import-credentials, or --init-auth',
     '  --init-auth                     Start local OAuth callback server and print an auth URL',
     '  --auth-timeout-ms <ms>          Defaults to 180000',
+    '  --scope <readonly|modify>        OAuth scope to request or verify; defaults to readonly',
     '  --mailbox <name>                Auth/message mode: primary by default; use secondary, tertiary, or both where supported',
     '  --mailboxes <list>              Search mode: primary,secondary by default; use tertiary explicitly',
     '  --search <gmail-query>          Search Gmail and return message metadata plus extracted text',
@@ -70,7 +74,8 @@ async function main() {
 
   if (args['prepare-auth-repair']) {
     const mailboxLabels = parseMailboxSelection(args.mailboxes || '', []);
-    const result = await prepareAuthRepair({ baseOptions: secretOptions, mailboxes: mailboxLabels });
+    const requiredScope = gmailOauthScope(args.scope || 'readonly');
+    const result = await prepareAuthRepair({ baseOptions: secretOptions, mailboxes: mailboxLabels, requiredScope });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
   }
@@ -108,11 +113,14 @@ async function main() {
 
   if (args['init-auth']) {
     requireKeychainAuthorization(args, '--init-auth');
+    const oauthScope = gmailOauthScope(args.scope || 'readonly');
     const mailboxLabels = parseMailboxSelection(args.mailbox || 'primary', ['primary']);
     const authResults = [];
     for (const mailbox of mailboxLabels) {
       authResults.push(await initAuth({
         ...mailboxSecretOptions(secretOptions, mailbox),
+        oauthScope,
+        requiredCapability: gmailCapabilityForScope(oauthScope),
         allowKeychainWrite: true,
         timeoutMs: args['auth-timeout-ms'] ? Number(args['auth-timeout-ms']) : 180000,
       }));
@@ -126,8 +134,12 @@ async function main() {
   }
 
   if (args['auth-check']) {
+    const oauthScope = gmailOauthScope(args.scope || 'readonly');
     const mailboxLabels = parseMailboxSelection(args.mailbox || 'primary', ['primary']);
-    const result = await verifyGmailAuthForMailboxes(secretOptions, mailboxLabels);
+    const result = await verifyGmailAuthForMailboxes({
+      ...secretOptions,
+      requiredCapability: gmailCapabilityForScope(oauthScope),
+    }, mailboxLabels);
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
   }

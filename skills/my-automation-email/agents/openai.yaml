@@ -1,6 +1,6 @@
 interface:
   display_name: "my-automation-email"
-  short_description: "Read and recover configured Gmail access"
+  short_description: "Read, recover, and narrowly update Gmail"
   default_prompt: "Use $my-automation-email to search my Gmail accounts for relevant messages."
 
 policy:

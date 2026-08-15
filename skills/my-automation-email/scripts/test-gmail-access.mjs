@@ -2,25 +2,34 @@
 import assert from 'node:assert/strict';
 import {
   GMAIL_MAILBOXES,
+  GMAIL_MODIFY_SCOPE,
   GMAIL_READONLY_SCOPE,
   KEYCHAIN_SERVICE,
   LEGACY_KEYCHAIN_SERVICE,
   canPersistTokenRefresh,
+  coalesceTokenRefresh,
   encodeKeychainValue,
   extractMessageText,
   formatMessageForOutput,
+  gmailCapabilityForScope,
   gmailMessageAccountChooserUrl,
   gmailMailboxConfig,
+  gmailOauthScope,
   gmailMessageSearchQuery,
   gmailMessageWebUrl,
   gmailThreadAccountChooserUrl,
   gmailThreadDirectUrl,
+  getThreadState,
   googleAccountChooserUrl,
   keychainRef,
   migrateKeychainService,
+  markThreadRead,
   parseArgs,
   parseMailboxSelection,
+  setThreadRead,
+  setThreadStarred,
   tokenAccountForMailbox,
+  tokenSupportsCapability,
   tokenRefreshWriteOptions,
   verifyAndStoreAuthorizedToken,
 } from './lib/gmail-access.mjs';
@@ -85,6 +94,14 @@ assert.equal(gmailMailboxConfig('tertiary').gmailUserIndex, 2);
 assert.equal(gmailMailboxConfig('tertiary').matchPriority, -1);
 assert.equal(typeof gmailMailboxConfig('primary').expectedEmail, 'string');
 assert.equal(keychainRef('token-primary'), 'keychain://my-automation.gmail-oauth/token-primary');
+assert.equal(gmailOauthScope('readonly'), GMAIL_READONLY_SCOPE);
+assert.equal(gmailOauthScope('modify'), GMAIL_MODIFY_SCOPE);
+assert.equal(gmailCapabilityForScope(GMAIL_MODIFY_SCOPE), 'modify');
+assert.equal(tokenSupportsCapability({ scope: GMAIL_READONLY_SCOPE }, 'read'), true);
+assert.equal(tokenSupportsCapability({ scope: GMAIL_READONLY_SCOPE }, 'modify'), false);
+assert.equal(tokenSupportsCapability({ scope: GMAIL_MODIFY_SCOPE }, 'read'), true);
+assert.equal(tokenSupportsCapability({ scope: GMAIL_MODIFY_SCOPE }, 'modify'), true);
+assert.throws(() => gmailOauthScope('send'), /Unsupported Gmail OAuth scope/);
 
 const secondaryRefreshOptions = tokenRefreshWriteOptions({
   tokenAccount: 'token-secondary',
@@ -95,6 +112,127 @@ assert.equal(secondaryRefreshOptions.allowKeychainWrite, undefined);
 assert.equal(canPersistTokenRefresh(secondaryRefreshOptions), true);
 assert.equal(canPersistTokenRefresh({ allowKeychainWrite: true }), true);
 assert.equal(canPersistTokenRefresh({}), false);
+
+let refreshCalls = 0;
+let releaseRefresh;
+const refreshGate = new Promise((resolve) => { releaseRefresh = resolve; });
+const firstRefresh = coalesceTokenRefresh({ tokenAccount: 'token-primary' }, async () => {
+  refreshCalls += 1;
+  await refreshGate;
+  return 'refreshed-access';
+});
+const secondRefresh = coalesceTokenRefresh({ tokenAccount: 'token-primary' }, async () => {
+  refreshCalls += 1;
+  return 'duplicate-refresh';
+});
+await Promise.resolve();
+assert.equal(refreshCalls, 1);
+releaseRefresh();
+assert.deepEqual(await Promise.all([firstRefresh, secondRefresh]), ['refreshed-access', 'refreshed-access']);
+
+let mutationRequest;
+const markReadResult = await markThreadRead({
+  gmailAccount: { label: 'primary', profileEmail: 'primary@example.com', accessToken: 'access' },
+  threadId: 'thread/one',
+  gmailJsonRequestFn: async (accessToken, pathname, options) => {
+    mutationRequest = { accessToken, pathname, options };
+    return { id: 'must-not-be-returned' };
+  },
+});
+assert.deepEqual(mutationRequest, {
+  accessToken: 'access',
+  pathname: '/users/me/threads/thread%2Fone/modify',
+  options: { method: 'POST', body: { removeLabelIds: ['UNREAD'] } },
+});
+assert.deepEqual(markReadResult, { ok: true, mailbox: 'primary', profileEmail: 'primary@example.com' });
+
+let stateRequest;
+const mixedThreadState = await getThreadState({
+  gmailAccount: { label: 'primary', profileEmail: 'primary@example.com', accessToken: 'access' },
+  threadId: 'thread/state',
+  gmailRequestFn: async (accessToken, pathname, params) => {
+    stateRequest = { accessToken, pathname, params };
+    return {
+      id: 'thread/state',
+      messages: [
+        { id: 'message-1', labelIds: ['INBOX', 'STARRED'] },
+        { id: 'message-2', labelIds: ['INBOX', 'UNREAD'] },
+      ],
+    };
+  },
+});
+assert.deepEqual(stateRequest, {
+  accessToken: 'access',
+  pathname: '/users/me/threads/thread%2Fstate',
+  params: { format: 'minimal', fields: 'id,historyId,messages(id,labelIds)' },
+});
+assert.deepEqual(mixedThreadState, {
+  ok: true,
+  mailbox: 'primary',
+  profileEmail: 'primary@example.com',
+  read: false,
+  starred: true,
+  message_count: 2,
+});
+
+const labelMutations = [];
+const mutationAccount = { label: 'secondary', profileEmail: 'secondary@example.com', accessToken: 'secondary-access' };
+const recordLabelMutation = async (accessToken, pathname, options) => {
+  labelMutations.push({ accessToken, pathname, options });
+  return { id: 'thread-labels' };
+};
+await setThreadRead({
+  gmailAccount: mutationAccount,
+  threadId: 'thread-labels',
+  read: false,
+  gmailJsonRequestFn: recordLabelMutation,
+});
+await setThreadStarred({
+  gmailAccount: mutationAccount,
+  threadId: 'thread-labels',
+  starred: true,
+  gmailJsonRequestFn: recordLabelMutation,
+});
+await setThreadStarred({
+  gmailAccount: mutationAccount,
+  threadId: 'thread-labels',
+  starred: false,
+  gmailJsonRequestFn: recordLabelMutation,
+});
+assert.deepEqual(labelMutations, [
+  {
+    accessToken: 'secondary-access',
+    pathname: '/users/me/threads/thread-labels/modify',
+    options: { method: 'POST', body: { addLabelIds: ['UNREAD'] } },
+  },
+  {
+    accessToken: 'secondary-access',
+    pathname: '/users/me/threads/thread-labels/modify',
+    options: { method: 'POST', body: { addLabelIds: ['STARRED'] } },
+  },
+  {
+    accessToken: 'secondary-access',
+    pathname: '/users/me/threads/thread-labels/modify',
+    options: { method: 'POST', body: { removeLabelIds: ['STARRED'] } },
+  },
+]);
+await assert.rejects(() => getThreadState({
+  gmailAccount: mutationAccount,
+  threadId: 'empty-thread',
+  gmailRequestFn: async () => ({ id: 'empty-thread', messages: [] }),
+}), /empty thread/);
+assert.throws(() => setThreadRead({
+  gmailAccount: mutationAccount,
+  threadId: 'thread-labels',
+  read: 'yes',
+  gmailJsonRequestFn: recordLabelMutation,
+}), /Read state must be a boolean/);
+assert.throws(() => setThreadStarred({
+  gmailAccount: mutationAccount,
+  threadId: 'thread-labels',
+  starred: 1,
+  gmailJsonRequestFn: recordLabelMutation,
+}), /Starred state must be a boolean/);
 
 const sample = message({ id: 'abc123', subject: 'Receipt', body: 'Plain text body' });
 assert.equal(extractMessageText(sample), 'Plain text body');
@@ -210,6 +348,7 @@ try {
     secretExistsFn: () => true,
     readTokenFn: () => ({ scope: GMAIL_READONLY_SCOPE, access_token: 'stored-but-not-returned' }),
     getAccessTokenFn: async (options) => {
+      assert.equal(options.requiredCapability, 'read');
       assert.equal(options.allowKeychainWrite, false);
       assert.equal(options.allowTokenRefreshWrite, false);
       persistedRefresh = Boolean(options.allowKeychainWrite || options.allowTokenRefreshWrite);
@@ -240,6 +379,46 @@ try {
   });
   assert.equal(revoked.status, 'reauthorization_required');
   assert.equal(revoked.reason, 'invalid_grant');
+
+  const revokedModify = await checkMailboxAuth({}, 'primary', {
+    secretExistsFn: () => true,
+    readTokenFn: () => ({ scope: GMAIL_MODIFY_SCOPE }),
+    getAccessTokenFn: async () => { throw new Error('invalid_grant'); },
+  });
+  assert.equal(revokedModify.reauthorizationScope, GMAIL_MODIFY_SCOPE);
+
+  let modifyReady = false;
+  const modifyCheck = async (_options, mailbox) => ({
+    mailbox,
+    expectedEmail: `${mailbox}@example.com`,
+    profileEmail: modifyReady ? `${mailbox}@example.com` : '',
+    gmailUserIndex: gmailMailboxConfig(mailbox).gmailUserIndex,
+    keychainTokenAccount: gmailMailboxConfig(mailbox).tokenAccount,
+    keychainTokenRef: keychainRef(gmailMailboxConfig(mailbox).tokenAccount),
+    requiredScope: GMAIL_MODIFY_SCOPE,
+    reauthorizationScope: GMAIL_MODIFY_SCOPE,
+    status: modifyReady ? 'ready' : 'reauthorization_required',
+    reason: modifyReady ? 'verified_profile' : 'invalid_grant',
+    ready: modifyReady,
+  });
+  const prepareModify = ({ mailboxes, requiredScope = GMAIL_MODIFY_SCOPE }) => prepareAuthRepair({
+    mailboxes,
+    requiredScope,
+    checkMailboxAuthFn: modifyCheck,
+  });
+  const modifyPlan = await prepareModify({ mailboxes: ['primary'] });
+  assert.equal(modifyPlan.requiredScope, GMAIL_MODIFY_SCOPE);
+  assert.equal(modifyPlan.repairTargets[0].oauthScope, GMAIL_MODIFY_SCOPE);
+  const modifyRecovery = await applyAuthRepairPlan(modifyPlan, {
+    prepareAuthRepairFn: prepareModify,
+    initAuthFn: async (options) => {
+      assert.equal(options.oauthScope, GMAIL_MODIFY_SCOPE);
+      assert.equal(options.requiredCapability, 'modify');
+      modifyReady = true;
+      return { ok: true, status: 'ready' };
+    },
+  });
+  assert.equal(modifyRecovery.ok, true);
 
   const wrongAccount = await checkMailboxAuth({}, 'primary', {
     secretExistsFn: () => true,
@@ -285,6 +464,20 @@ try {
   assert.equal(rejectedCandidate.status, 'wrong_account');
   assert.equal(rejectedCandidate.tokenPreserved, true);
   assert.equal(wroteCandidate, false);
+
+  const rejectedMissingModify = await verifyAndStoreAuthorizedToken(
+    { access_token: 'candidate', scope: GMAIL_READONLY_SCOPE },
+    {
+      mailbox: 'primary', expectedEmail: 'primary@example.com', allowKeychainWrite: true,
+      oauthScope: GMAIL_MODIFY_SCOPE, requiredCapability: 'modify',
+    },
+    {
+      gmailRequestFn: async () => { throw new Error('profile must not be queried without scope'); },
+      writeSecretFn: () => { wroteCandidate = true; },
+    },
+  );
+  assert.equal(rejectedMissingModify.status, 'missing_required_scope');
+  assert.equal(rejectedMissingModify.tokenPreserved, true);
 
   const changedScopeCheck = async (_options, mailbox) => ({
     ...(await checkFn(_options, mailbox)),

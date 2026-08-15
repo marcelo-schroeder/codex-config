@@ -4,18 +4,21 @@ import {
   GMAIL_MAILBOXES,
   GMAIL_READONLY_SCOPE,
   KEYCHAIN_SERVICE,
+  gmailCapabilityForScope,
   getAccessToken,
   gmailMailboxConfig,
+  gmailOauthScope,
   gmailRequest,
   initAuth,
   mailboxSecretOptions,
   readToken,
+  reauthorizationScopeForToken,
   secretExists,
   secretRef,
-  tokenHasScope,
+  tokenSupportsCapability,
 } from './gmail-access.mjs';
 
-export const AUTH_REPAIR_PLAN_VERSION = 1;
+export const AUTH_REPAIR_PLAN_VERSION = 2;
 
 const SECRET_FIELD = /(credential|client.?secret|access.?token|refresh.?token|id.?token|password|private.?key|raw.?keychain|secret.?value|^token$|^secret$)/i;
 
@@ -69,7 +72,8 @@ function baseResult(mailbox, options) {
     gmailUserIndex: config.gmailUserIndex,
     keychainTokenAccount: config.tokenAccount,
     keychainTokenRef: secretRef('token', options),
-    requiredScope: GMAIL_READONLY_SCOPE,
+    requiredScope: gmailOauthScope(options.requiredScope || GMAIL_READONLY_SCOPE),
+    reauthorizationScope: gmailOauthScope(options.requiredScope || GMAIL_READONLY_SCOPE),
     status: '',
     reason: '',
     ready: false,
@@ -88,6 +92,7 @@ function authFailureReason(error) {
 export async function checkMailboxAuth(baseOptions, mailbox, dependencies = {}) {
   const options = mailboxSecretOptions(baseOptions, mailbox);
   const result = baseResult(mailbox, options);
+  const requiredCapability = gmailCapabilityForScope(result.requiredScope);
   const secretExistsFn = dependencies.secretExistsFn || secretExists;
   const readTokenFn = dependencies.readTokenFn || readToken;
   const getAccessTokenFn = dependencies.getAccessTokenFn || getAccessToken;
@@ -105,21 +110,27 @@ export async function checkMailboxAuth(baseOptions, mailbox, dependencies = {}) 
   } catch {
     return { ...result, status: 'reauthorization_required', reason: 'unreadable_token' };
   }
-  if (!tokenHasScope(token)) {
-    return { ...result, status: 'missing_scope', reason: 'missing_scope' };
+  const reauthorizationScope = reauthorizationScopeForToken(token, result.requiredScope);
+  if (!tokenSupportsCapability(token, requiredCapability)) {
+    return { ...result, reauthorizationScope, status: 'missing_scope', reason: 'missing_scope' };
   }
 
   try {
     // Deliberately omit every write-enabling option: preparation may refresh only in memory.
-    const accessToken = await getAccessTokenFn({ ...options, allowKeychainWrite: false, allowTokenRefreshWrite: false });
+    const accessToken = await getAccessTokenFn({
+      ...options,
+      requiredCapability,
+      allowKeychainWrite: false,
+      allowTokenRefreshWrite: false,
+    });
     const profile = await gmailRequestFn(accessToken, '/users/me/profile');
     const profileEmail = cleanEmail(profile.emailAddress);
     if (profileEmail !== result.expectedEmail) {
-      return { ...result, profileEmail, status: 'wrong_account', reason: 'profile_mismatch' };
+      return { ...result, reauthorizationScope, profileEmail, status: 'wrong_account', reason: 'profile_mismatch' };
     }
-    return { ...result, profileEmail, status: 'ready', reason: 'verified_profile', ready: true };
+    return { ...result, reauthorizationScope, profileEmail, status: 'ready', reason: 'verified_profile', ready: true };
   } catch (error) {
-    return { ...result, status: 'reauthorization_required', reason: authFailureReason(error) };
+    return { ...result, reauthorizationScope, status: 'reauthorization_required', reason: authFailureReason(error) };
   }
 }
 
@@ -127,7 +138,7 @@ function planBasis(results) {
   return {
     version: AUTH_REPAIR_PLAN_VERSION,
     keychainService: KEYCHAIN_SERVICE,
-    requiredScope: GMAIL_READONLY_SCOPE,
+    requiredScope: results[0]?.requiredScope || GMAIL_READONLY_SCOPE,
     mailboxes: results.map((result) => ({
       mailbox: result.mailbox,
       expectedEmail: result.expectedEmail,
@@ -136,6 +147,8 @@ function planBasis(results) {
       keychainTokenRef: result.keychainTokenRef,
       status: result.status,
       reason: result.reason,
+      requiredScope: result.requiredScope,
+      reauthorizationScope: result.reauthorizationScope,
     })),
   };
 }
@@ -147,14 +160,26 @@ export function repairPlanId(results) {
 export async function prepareAuthRepair({
   baseOptions = { keychainService: KEYCHAIN_SERVICE },
   mailboxes,
+  requiredScope = GMAIL_READONLY_SCOPE,
   now = new Date(),
   checkMailboxAuthFn = checkMailboxAuth,
 } = {}) {
+  const normalizedRequiredScope = gmailOauthScope(requiredScope);
+  const requiredCapability = gmailCapabilityForScope(normalizedRequiredScope);
   const labels = cleanLabels(mailboxes);
   if (labels.length === 0) throw new Error('At least one Gmail mailbox is required');
   const results = [];
   for (const mailbox of labels) {
-    results.push(await checkMailboxAuthFn(baseOptions, mailbox));
+    const checked = await checkMailboxAuthFn({
+      ...baseOptions,
+      requiredScope: normalizedRequiredScope,
+      requiredCapability,
+    }, mailbox);
+    results.push({
+      ...checked,
+      requiredScope: normalizedRequiredScope,
+      reauthorizationScope: checked.reauthorizationScope || normalizedRequiredScope,
+    });
   }
   const repairTargets = results.filter((result) => !result.ready).map((result) => ({
     mailbox: result.mailbox,
@@ -163,6 +188,7 @@ export async function prepareAuthRepair({
     keychainTokenAccount: result.keychainTokenAccount,
     keychainTokenRef: result.keychainTokenRef,
     approvedStatus: result.status,
+    oauthScope: result.reauthorizationScope,
     action: 'reauthorize',
   }));
   const plan = {
@@ -171,7 +197,7 @@ export async function prepareAuthRepair({
     planId: repairPlanId(results),
     preparedAt: new Date(now).toISOString(),
     keychainService: KEYCHAIN_SERVICE,
-    requiredScope: GMAIL_READONLY_SCOPE,
+    requiredScope: normalizedRequiredScope,
     ok: repairTargets.length === 0,
     status: repairTargets.length === 0 ? 'ready' : 'repair_required',
     mailboxes: results,
@@ -189,6 +215,7 @@ export function validateAuthRepairPlan(plan) {
   if (!Array.isArray(plan.mailboxes) || !Array.isArray(plan.repairTargets) || !plan.planId) {
     throw new Error('Gmail authentication repair plan is incomplete');
   }
+  const requiredScope = gmailOauthScope(plan.requiredScope);
   const labels = cleanLabels(plan.mailboxes.map((mailbox) => mailbox.mailbox));
   if (labels.length !== plan.mailboxes.length) throw new Error('Gmail authentication repair plan has duplicate mailboxes');
   for (const item of plan.mailboxes) {
@@ -198,6 +225,8 @@ export function validateAuthRepairPlan(plan) {
       || Number(item.gmailUserIndex) !== config.gmailUserIndex
       || item.keychainTokenAccount !== config.tokenAccount
       || item.keychainTokenRef !== secretRef('token', mailboxSecretOptions({ keychainService: KEYCHAIN_SERVICE }, item.mailbox))
+      || gmailOauthScope(item.requiredScope) !== requiredScope
+      || gmailOauthScope(item.reauthorizationScope) !== item.reauthorizationScope
     ) {
       throw new Error(`Gmail mailbox configuration changed for ${item.mailbox}; prepare a new repair plan`);
     }
@@ -218,6 +247,7 @@ export function validateAuthRepairPlan(plan) {
       || target.keychainTokenAccount !== mailbox.keychainTokenAccount
       || target.keychainTokenRef !== mailbox.keychainTokenRef
       || target.approvedStatus !== mailbox.status
+      || gmailOauthScope(target.oauthScope) !== mailbox.reauthorizationScope
     ) {
       throw new Error(`Gmail authentication repair target changed for ${target.mailbox}`);
     }
@@ -237,7 +267,7 @@ export async function applyAuthRepairPlan(plan, {
 } = {}) {
   validateAuthRepairPlan(plan);
   const labels = plan.mailboxes.map((mailbox) => mailbox.mailbox);
-  const current = await prepareAuthRepairFn({ baseOptions, mailboxes: labels });
+  const current = await prepareAuthRepairFn({ baseOptions, mailboxes: labels, requiredScope: plan.requiredScope });
   const approvedTargets = new Map(plan.repairTargets.map((target) => [target.mailbox, target]));
   const expanded = current.repairTargets.filter((target) => !approvedTargets.has(target.mailbox));
   if (expanded.length > 0) {
@@ -262,6 +292,8 @@ export async function applyAuthRepairPlan(plan, {
     const authorized = await initAuthFn({
       ...options,
       expectedEmail: approved.expectedEmail,
+      oauthScope: approved.oauthScope,
+      requiredCapability: gmailCapabilityForScope(approved.oauthScope),
       allowKeychainWrite: true,
       timeoutMs,
     });
@@ -275,7 +307,11 @@ export async function applyAuthRepairPlan(plan, {
       });
       return { ok: false, status: 'recovery_failed', approvedPlanId: plan.planId, results };
     }
-    const verifiedPlan = await prepareAuthRepairFn({ baseOptions, mailboxes: [approved.mailbox] });
+    const verifiedPlan = await prepareAuthRepairFn({
+      baseOptions,
+      mailboxes: [approved.mailbox],
+      requiredScope: plan.requiredScope,
+    });
     const verified = verifiedPlan.mailboxes[0];
     if (!verified?.ready) {
       results.push({ mailbox: approved.mailbox, status: 'verification_failed', expectedEmail: approved.expectedEmail });
@@ -284,7 +320,7 @@ export async function applyAuthRepairPlan(plan, {
     results.push({ mailbox: approved.mailbox, status: 'repaired', expectedEmail: approved.expectedEmail, profileEmail: verified.profileEmail });
   }
 
-  const finalPlan = await prepareAuthRepairFn({ baseOptions, mailboxes: labels });
+  const finalPlan = await prepareAuthRepairFn({ baseOptions, mailboxes: labels, requiredScope: plan.requiredScope });
   const output = {
     ok: finalPlan.ok,
     status: finalPlan.ok ? 'ready' : 'recovery_failed',

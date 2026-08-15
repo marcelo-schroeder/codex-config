@@ -4,6 +4,8 @@ import http from 'node:http';
 import { URL, URLSearchParams } from 'node:url';
 
 export const GMAIL_READONLY_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
+export const GMAIL_MODIFY_SCOPE = 'https://www.googleapis.com/auth/gmail.modify';
+const GMAIL_FULL_SCOPE = 'https://mail.google.com/';
 export const GMAIL_API_BASE = 'https://gmail.googleapis.com/gmail/v1';
 export const OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 export const OAUTH_AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
@@ -42,6 +44,26 @@ export const GMAIL_MAILBOXES = [
     matchPriority: -1,
   },
 ];
+
+const inFlightTokenRefreshes = new Map();
+
+export function gmailOauthScope(value = 'readonly') {
+  const normalized = String(value || 'readonly').trim().toLowerCase();
+  if (normalized === 'readonly' || normalized === GMAIL_READONLY_SCOPE) return GMAIL_READONLY_SCOPE;
+  if (normalized === 'modify' || normalized === GMAIL_MODIFY_SCOPE) return GMAIL_MODIFY_SCOPE;
+  throw new Error(`Unsupported Gmail OAuth scope: ${value}`);
+}
+
+export function gmailCapabilityForScope(scope = GMAIL_READONLY_SCOPE) {
+  return gmailOauthScope(scope) === GMAIL_MODIFY_SCOPE ? 'modify' : 'read';
+}
+
+export function gmailRequiredScope(capability = 'read') {
+  const normalized = String(capability || 'read').trim().toLowerCase();
+  if (normalized === 'read') return GMAIL_READONLY_SCOPE;
+  if (normalized === 'modify') return GMAIL_MODIFY_SCOPE;
+  throw new Error(`Unsupported Gmail capability: ${capability}`);
+}
 
 export function parseArgs(argv) {
   const args = {};
@@ -456,6 +478,29 @@ export function tokenHasScope(token, scope = GMAIL_READONLY_SCOPE) {
   return String(token?.scope || '').split(/\s+/).includes(scope);
 }
 
+export function tokenSupportsCapability(token, capability = 'read') {
+  const requiredScope = gmailRequiredScope(capability);
+  if (tokenHasScope(token, GMAIL_FULL_SCOPE) || tokenHasScope(token, requiredScope)) return true;
+  return capability === 'read' && tokenHasScope(token, GMAIL_MODIFY_SCOPE);
+}
+
+export function reauthorizationScopeForToken(token, fallbackScope = GMAIL_READONLY_SCOPE) {
+  if (tokenHasScope(token, GMAIL_MODIFY_SCOPE)) return GMAIL_MODIFY_SCOPE;
+  return gmailOauthScope(fallbackScope);
+}
+
+export async function coalesceTokenRefresh(options, refresh) {
+  const key = [options.keychainService || KEYCHAIN_SERVICE, options.tokenAccount || KEYCHAIN_TOKEN_ACCOUNT].join('\u001f');
+  if (inFlightTokenRefreshes.has(key)) return inFlightTokenRefreshes.get(key);
+  const pending = Promise.resolve().then(refresh);
+  inFlightTokenRefreshes.set(key, pending);
+  try {
+    return await pending;
+  } finally {
+    if (inFlightTokenRefreshes.get(key) === pending) inFlightTokenRefreshes.delete(key);
+  }
+}
+
 export function tokenExpired(token) {
   if (!token?.access_token) {
     return true;
@@ -515,11 +560,15 @@ export async function getAccessToken(options) {
   if (!token) {
     throw new Error(`Missing Gmail OAuth token: ${secretRef('token', options)}. Run with --init-auth first.`);
   }
-  if (!tokenHasScope(token)) {
-    throw new Error(`Gmail OAuth token does not include ${GMAIL_READONLY_SCOPE}`);
+  const requiredCapability = options.requiredCapability || 'read';
+  const requiredScope = gmailRequiredScope(requiredCapability);
+  if (!tokenSupportsCapability(token, requiredCapability)) {
+    const error = new Error(`Gmail OAuth token does not authorize the ${requiredCapability} capability (${requiredScope})`);
+    error.code = 'gmail_scope_missing';
+    throw error;
   }
   if (tokenExpired(token)) {
-    token = await refreshAccessToken(client, options, token);
+    token = await coalesceTokenRefresh(options, () => refreshAccessToken(client, options, token));
   }
   return token.access_token;
 }
@@ -528,6 +577,13 @@ export async function gmailAccountForMailbox(baseOptions, label) {
   const mailboxOptions = mailboxSecretOptions(baseOptions, label);
   const accessToken = await getAccessToken(tokenRefreshWriteOptions(mailboxOptions));
   const profile = await gmailRequest(accessToken, '/users/me/profile');
+  const profileEmail = normalizeComparable(profile.emailAddress);
+  const expectedEmail = normalizeComparable(mailboxOptions.expectedEmail);
+  if (expectedEmail && profileEmail !== expectedEmail) {
+    const error = new Error(`Gmail profile does not match the configured ${label} mailbox`);
+    error.code = 'gmail_profile_mismatch';
+    throw error;
+  }
   return {
     label,
     tokenAccount: mailboxOptions.tokenAccount,
@@ -549,6 +605,7 @@ export async function gmailAccountsForMailboxes(baseOptions, labels) {
 
 export async function initAuth({ timeoutMs = 180000, ...options }) {
   const client = loadOauthClient(options);
+  const oauthScope = gmailOauthScope(options.oauthScope || GMAIL_READONLY_SCOPE);
   let redirectUri = '';
 
   const server = http.createServer();
@@ -593,7 +650,7 @@ export async function initAuth({ timeoutMs = 180000, ...options }) {
         client_id: client.clientId,
         redirect_uri: redirectUri,
         response_type: 'code',
-        scope: GMAIL_READONLY_SCOPE,
+        scope: oauthScope,
         access_type: 'offline',
         prompt: 'consent',
       }).toString();
@@ -615,16 +672,28 @@ export async function initAuth({ timeoutMs = 180000, ...options }) {
   });
   const stored = {
     ...token,
-    scope: token.scope || GMAIL_READONLY_SCOPE,
+    scope: token.scope || oauthScope,
     expiry_date: token.expires_in ? Date.now() + Number(token.expires_in) * 1000 : undefined,
   };
-  return verifyAndStoreAuthorizedToken(stored, options);
+  return verifyAndStoreAuthorizedToken(stored, { ...options, oauthScope });
 }
 
 export async function verifyAndStoreAuthorizedToken(stored, options, {
   gmailRequestFn = gmailRequest,
   writeSecretFn = writeSecret,
 } = {}) {
+  const requiredCapability = options.requiredCapability
+    || gmailCapabilityForScope(options.oauthScope || GMAIL_READONLY_SCOPE);
+  if (!tokenSupportsCapability(stored, requiredCapability)) {
+    return {
+      ok: false,
+      status: 'missing_required_scope',
+      mailbox: options.mailbox || 'primary',
+      expectedEmail: options.expectedEmail || '',
+      profileEmail: '',
+      tokenPreserved: true,
+    };
+  }
   const profile = await gmailRequestFn(stored.access_token, '/users/me/profile');
   const profileEmail = normalizeComparable(profile.emailAddress);
   const expectedEmail = normalizeComparable(options.expectedEmail);
@@ -680,6 +749,114 @@ export async function gmailRequest(accessToken, pathname, params = {}) {
   return body;
 }
 
+export async function gmailJsonRequest(accessToken, pathname, {
+  method = 'POST',
+  body = {},
+  fetchFn = fetch,
+} = {}) {
+  const response = await fetchFn(new URL(`${GMAIL_API_BASE}${pathname}`), {
+    method,
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  let responseBody = null;
+  try {
+    responseBody = text ? JSON.parse(text) : {};
+  } catch {
+    responseBody = { error: text };
+  }
+  if (!response.ok) {
+    throw new Error(`Gmail mutation failed: HTTP ${response.status} ${JSON.stringify(responseBody)}`);
+  }
+  return responseBody;
+}
+
+function verifiedThreadRequest(gmailAccount, threadId) {
+  const normalizedThreadId = String(threadId || '').trim();
+  if (!normalizedThreadId || normalizedThreadId.length > 256) {
+    throw new Error('A valid Gmail thread ID is required');
+  }
+  if (!gmailAccount?.accessToken) throw new Error('A verified Gmail account is required');
+  return normalizedThreadId;
+}
+
+function threadAccountResult(gmailAccount) {
+  return {
+    ok: true,
+    mailbox: gmailAccount.label || '',
+    profileEmail: gmailAccount.profileEmail || '',
+  };
+}
+
+export async function getThreadState({ gmailAccount, threadId, gmailRequestFn = gmailRequest }) {
+  const normalizedThreadId = verifiedThreadRequest(gmailAccount, threadId);
+  const thread = await gmailRequestFn(
+    gmailAccount.accessToken,
+    `/users/me/threads/${encodeURIComponent(normalizedThreadId)}`,
+    { format: 'minimal', fields: 'id,historyId,messages(id,labelIds)' },
+  );
+  const messages = Array.isArray(thread?.messages) ? thread.messages : [];
+  if (messages.length === 0) throw new Error('Gmail returned an empty thread');
+  const labels = messages.map((message) => new Set(Array.isArray(message?.labelIds) ? message.labelIds : []));
+  return {
+    ...threadAccountResult(gmailAccount),
+    read: !labels.some((messageLabels) => messageLabels.has('UNREAD')),
+    starred: labels.some((messageLabels) => messageLabels.has('STARRED')),
+    message_count: messages.length,
+  };
+}
+
+async function setThreadSystemLabel({
+  gmailAccount,
+  threadId,
+  label,
+  enabled,
+  gmailJsonRequestFn = gmailJsonRequest,
+}) {
+  const normalizedThreadId = verifiedThreadRequest(gmailAccount, threadId);
+  if (typeof enabled !== 'boolean') throw new Error(`${label} state must be a boolean`);
+  await gmailJsonRequestFn(
+    gmailAccount.accessToken,
+    `/users/me/threads/${encodeURIComponent(normalizedThreadId)}/modify`,
+    {
+      method: 'POST',
+      body: enabled ? { addLabelIds: [label] } : { removeLabelIds: [label] },
+    },
+  );
+  return threadAccountResult(gmailAccount);
+}
+
+export function setThreadRead({ gmailAccount, threadId, read, gmailJsonRequestFn = gmailJsonRequest }) {
+  if (typeof read !== 'boolean') throw new Error('Read state must be a boolean');
+  return setThreadSystemLabel({
+    gmailAccount,
+    threadId,
+    label: 'UNREAD',
+    enabled: !read,
+    gmailJsonRequestFn,
+  });
+}
+
+export function setThreadStarred({ gmailAccount, threadId, starred, gmailJsonRequestFn = gmailJsonRequest }) {
+  if (typeof starred !== 'boolean') throw new Error('Starred state must be a boolean');
+  return setThreadSystemLabel({
+    gmailAccount,
+    threadId,
+    label: 'STARRED',
+    enabled: starred,
+    gmailJsonRequestFn,
+  });
+}
+
+export async function markThreadRead({ gmailAccount, threadId, gmailJsonRequestFn = gmailJsonRequest }) {
+  return setThreadRead({ gmailAccount, threadId, read: true, gmailJsonRequestFn });
+}
+
 export async function verifyGmailAuth(options) {
   const mailbox = gmailMailboxConfig(options.mailbox || 'primary');
   const credentialsExists = secretExists('credentials', options);
@@ -694,7 +871,7 @@ export async function verifyGmailAuth(options) {
     secretStore: 'keychain',
     credentialsExists,
     tokenExists,
-    requiredScope: GMAIL_READONLY_SCOPE,
+    requiredScope: gmailRequiredScope(options.requiredCapability || 'read'),
     tokenHasRequiredScope: false,
     consentComplete: false,
     profileEmail: '',
@@ -711,13 +888,20 @@ export async function verifyGmailAuth(options) {
     return result;
   }
   const token = readToken(options);
-  result.tokenHasRequiredScope = tokenHasScope(token);
+  result.tokenHasRequiredScope = tokenSupportsCapability(token, options.requiredCapability || 'read');
   if (!result.tokenHasRequiredScope) {
     result.status = 'missing_required_scope';
     return result;
   }
   const accessToken = await getAccessToken(tokenRefreshWriteOptions(options));
   const profile = await gmailRequest(accessToken, '/users/me/profile');
+  const profileEmail = normalizeComparable(profile.emailAddress);
+  const expectedEmail = normalizeComparable(options.expectedEmail || mailbox.expectedEmail);
+  if (expectedEmail && profileEmail !== expectedEmail) {
+    result.profileEmail = profile.emailAddress || '';
+    result.status = 'wrong_account';
+    return result;
+  }
   result.ok = true;
   result.consentComplete = true;
   result.profileEmail = profile.emailAddress || '';
@@ -742,7 +926,7 @@ export async function verifyGmailAuthForMailboxes(baseOptions, labels) {
   return {
     ok: results.every((result) => result.ok),
     secretStore: 'keychain',
-    requiredScope: GMAIL_READONLY_SCOPE,
+    requiredScope: gmailRequiredScope(baseOptions.requiredCapability || 'read'),
     status: results.every((result) => result.ok) ? 'ready' : 'mixed',
     statusCounts,
     mailboxes: results,
